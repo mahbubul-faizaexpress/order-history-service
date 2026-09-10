@@ -4,7 +4,7 @@ process.env.NODE_ENV = 'test';
 
 const jwt = require('jsonwebtoken');
 const config = require('../src/config');
-const { prisma } = require('../src/db');
+const { prisma, disconnect } = require('../src/db');
 
 // Wipe both tables and reset identity sequences. Cheap — the suite seeds its own
 // small fixtures and never touches the development data.
@@ -45,7 +45,7 @@ function token(userId, role = 'customer') {
 }
 
 async function closeDb() {
-  await prisma.$disconnect();
+  await disconnect();
 }
 
 module.exports = { resetDb, createUser, createOrders, token, closeDb };

@@ -62,7 +62,8 @@ npm start                  # 5. http://localhost:3000
 Check it is up:
 
 ```bash
-curl localhost:3000/health          # {"status":"ok"}
+curl localhost:3000/health          # {"status":"ok"}    liveness — process only
+curl localhost:3000/health/ready    # {"status":"ready"} readiness — pings Postgres
 ```
 
 > **Port 5432 already in use?** Set `POSTGRES_HOST_PORT` in `.env` to a free port
@@ -72,10 +73,13 @@ curl localhost:3000/health          # {"status":"ok"}
 
 ## Configuration
 
-All configuration is environment variables (`.env`, copied from `.env.example`):
+All configuration is environment variables (`.env`, copied from `.env.example`).
+They are validated with zod at startup — a missing or malformed value stops the
+process with a list of exactly what is wrong.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `NODE_ENV` | `development` | `development` \| `test` \| `production` |
 | `PORT` | `3000` | HTTP port |
 | `POSTGRES_HOST_PORT` | `5432` | Host port the Postgres container binds to |
 | `DATABASE_URL` | points at the `orders` db | Application database |
@@ -224,12 +228,16 @@ that database, inserts its own small fixtures, and never touches the seeded
 development data. Coverage:
 
 - orders come back newest-first
-- a user with no orders → `200` + `[]`
+- a user with no orders → `200` + `[]` (and an admin viewing that user → `200`, not `404`)
 - keyset paging visits every order exactly once, in order, across pages
 - caller views own orders → `200`; another user → `403`; admin → `200`
 - missing / invalid token → `401`
 - non-integer `:id` → `400`; oversized `limit` → clamped; bad `cursor` → `400`
 - admin views a non-existent user → `404`
+- every response carries `x-request-id`; unknown routes → structured `404`
+
+Plus `test/cursor.test.js` — pure unit tests for the cursor codec: round-trip,
+absent cursor, and rejection of tampered / non-canonical values.
 
 ---
 
@@ -237,17 +245,20 @@ development data. Coverage:
 
 ```
 src/
-  server.js          listen + graceful shutdown (SIGTERM → drain pool)
+  server.js          listen + graceful shutdown + last-resort process handlers
   app.js             buildApp() → Express instance (imported by tests)
-  config.js          env parsing / validation
-  db.js              PrismaClient + pg adapter (pool size, statement_timeout)
+  config.js          env validated with zod at boot — fail fast, readable errors
+  db.js              PrismaClient + pg adapter (pool, statement_timeout); ping / disconnect
   auth.js            Bearer JWT → req.caller { id, role }
   errors.js          AppError + central error handler
+  lib/
+    async-handler.js forwards async route rejections to the error handler
   orders/
     routes.js        GET /users/:id/orders
-    controller.js    authorization, validation, serialization
-    repository.js    keyset query
-    cursor.js        encodes / decodes the (created_at, id) cursor token
+    controller.js    validate → authorize → fetch → respond
+    repository.js    the single keyset query
+    serializer.js    the wire shape of an order (BigInt / Decimal handled here)
+    cursor.js        encode / decode + integrity-check the (created_at, id) token
 
 prisma/
   schema.prisma      User / Order models, mapped to snake_case tables

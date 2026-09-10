@@ -10,23 +10,23 @@ async function userExists(userId) {
   return found !== null;
 }
 
-// Keyset pagination expressed through Prisma's query builder.
+// Keyset ("seek") pagination.
 //
-// Prisma's built-in `cursor` + `skip: 1` is NOT used: it keys on a single unique
-// field, so with a compound `created_at, id` sort it walks id order, not date
-// order, and drops/repeats rows at page boundaries. Instead the boundary is an
-// explicit predicate: everything strictly after (created_at, id) of the last row
-// already returned. That maps onto idx_orders_user_created as a range scan.
+// Prisma's built-in `cursor` + `skip: 1` is deliberately NOT used: it keys on a
+// single unique field, so with a compound (created_at, id) sort it walks id
+// order rather than date order and drops or repeats rows at page boundaries.
+// The boundary here is an explicit predicate — everything strictly after the
+// (created_at, id) of the last row already returned — which the planner serves
+// from idx_orders_user_created as a bounded range scan (DECISIONS.md, scale).
 //
-// We take limit + 1 rows; the extra one, if present, means a next page exists.
+// `limit + 1` rows are fetched; the extra row, if present, means "has more".
 async function listOrders({ userId, limit, cursor }) {
   const where = { userId: BigInt(userId) };
 
   if (cursor) {
-    const at = new Date(cursor.createdAt);
     where.OR = [
-      { createdAt: { lt: at } },
-      { createdAt: at, id: { lt: BigInt(cursor.id) } },
+      { createdAt: { lt: cursor.createdAt } },
+      { createdAt: cursor.createdAt, id: { lt: BigInt(cursor.id) } },
     ];
   }
 

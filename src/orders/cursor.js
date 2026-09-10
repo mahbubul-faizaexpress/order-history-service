@@ -3,38 +3,41 @@
 const { badRequest } = require('../errors');
 
 // A cursor is the sort key of the last row already returned: (created_at, id).
-// We keep BOTH parts. Keying on id alone would skip rows that share a timestamp
-// when the boundary falls between them; keying on created_at alone is not unique.
-// Encoded as base64url of "<iso timestamp>|<id>" — opaque to clients.
+// Both parts are kept — keying on id alone skips rows that share a timestamp when
+// the page boundary falls between them; created_at alone is not unique.
+//
+// Wire format: base64url of "<ISO-8601 timestamp>|<id>". Opaque to clients, but
+// deliberately not signed — see DECISIONS.md ("Cursor tamper-proofing").
 
-function encodeCursor(row) {
-  if (!row) return null;
-  const raw = `${new Date(row.createdAt).toISOString()}|${row.id}`;
-  return Buffer.from(raw, 'utf8').toString('base64url');
+const SEPARATOR = '|';
+
+function encode({ createdAt, id }) {
+  const iso = createdAt instanceof Date ? createdAt.toISOString() : new Date(createdAt).toISOString();
+  return Buffer.from(`${iso}${SEPARATOR}${id}`, 'utf8').toString('base64url');
 }
 
-function decodeCursor(value) {
+function decode(value) {
   if (value === undefined || value === null || value === '') return null;
 
-  let raw;
-  try {
-    raw = Buffer.from(String(value), 'base64url').toString('utf8');
-  } catch {
-    throw badRequest('Malformed cursor');
-  }
-
-  const sep = raw.lastIndexOf('|');
+  const raw = Buffer.from(String(value), 'base64url').toString('utf8');
+  const sep = raw.lastIndexOf(SEPARATOR);
   if (sep === -1) throw badRequest('Malformed cursor');
 
-  const ts = raw.slice(0, sep);
+  const createdAt = new Date(raw.slice(0, sep));
   const id = Number(raw.slice(sep + 1));
-  const date = new Date(ts);
 
-  if (Number.isNaN(date.getTime()) || !Number.isInteger(id) || id <= 0) {
+  if (Number.isNaN(createdAt.getTime()) || !Number.isSafeInteger(id) || id <= 0) {
     throw badRequest('Malformed cursor');
   }
 
-  return { createdAt: date.toISOString(), id };
+  // Reject anything that is not the exact canonical encoding of what we parsed:
+  // trailing bytes, non-canonical timestamps, tampering that changes the string
+  // but not the parse. A valid cursor can only have come from a previous response.
+  if (encode({ createdAt, id }) !== String(value)) {
+    throw badRequest('Malformed cursor');
+  }
+
+  return { createdAt, id };
 }
 
-module.exports = { encodeCursor, decodeCursor };
+module.exports = { encode, decode };

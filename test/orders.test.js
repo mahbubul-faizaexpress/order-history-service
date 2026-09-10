@@ -126,3 +126,29 @@ test('a malformed cursor is 400', async () => {
     .set('Authorization', `Bearer ${token(10)}`);
   assert.equal(res.status, 400);
 });
+
+test('admin viewing an existing user with no orders is 200, not 404', async () => {
+  const res = await request(app)
+    .get('/api/users/20/orders')
+    .set('Authorization', `Bearer ${token(1, 'admin')}`);
+  assert.equal(res.status, 200);
+  assert.deepEqual(res.body.data, []);
+});
+
+test('every response carries an x-request-id header', async () => {
+  const res = await request(app)
+    .get('/api/users/10/orders')
+    .set('Authorization', `Bearer ${token(10)}`);
+  assert.ok(res.headers['x-request-id']);
+});
+
+test('liveness is up without touching the database; readiness checks it', async () => {
+  assert.equal((await request(app).get('/health')).status, 200);
+  assert.equal((await request(app).get('/health/ready')).status, 200);
+});
+
+test('unknown routes return a structured 404', async () => {
+  const res = await request(app).get('/api/nope');
+  assert.equal(res.status, 404);
+  assert.equal(res.body.error.code, 'ROUTE_NOT_FOUND');
+});

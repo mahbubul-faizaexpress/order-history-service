@@ -3,68 +3,54 @@
 const { z } = require('zod');
 const config = require('../config');
 const { badRequest, forbidden, notFound } = require('../errors');
-const { encodeCursor, decodeCursor } = require('./cursor');
+const { asyncHandler } = require('../lib/async-handler');
+const cursor = require('./cursor');
 const repository = require('./repository');
+const serializer = require('./serializer');
 
 const paramsSchema = z.object({
   id: z.coerce.number().int().positive(),
 });
 
 const querySchema = z.object({
-  limit: z.coerce.number().int().catch(config.defaultLimit),
+  // A malformed `limit` falls back to the default rather than 400-ing — it is a
+  // hint, not a resource identifier. Out-of-range values are clamped below.
+  limit: z.coerce.number().int().catch(config.pagination.defaultLimit),
   cursor: z.string().optional(),
 });
 
-function serializeOrder(row) {
-  return {
-    id: Number(row.id), // BigInt -> Number; safe well past any realistic order id
-    status: row.status,
-    // Prisma Decimal -> string, so exact cents survive (never through a JS float)
-    total_amount: row.totalAmount.toFixed(2),
-    currency: row.currency,
-    created_at: row.createdAt.toISOString(),
-  };
-}
-
-async function getUserOrders(req, res, next) {
-  try {
-    const params = paramsSchema.safeParse(req.params);
-    if (!params.success) {
-      throw badRequest('User id must be a positive integer');
-    }
-    const targetId = params.data.id;
-
-    const q = querySchema.parse(req.query);
-    const limit = Math.min(Math.max(q.limit, 1), config.maxLimit);
-    const cursor = decodeCursor(q.cursor);
-
-    // Requirement #4: self, or an admin.
-    const caller = req.caller;
-    if (caller.id !== targetId && caller.role !== 'admin') {
-      throw forbidden();
-    }
-
-    // Requirement #3: a user with no orders is a 200 with an empty list.
-    // Only pay for the existence check when it can actually matter: an admin
-    // (or the rare token whose subject no longer exists) asking about someone
-    // else. A caller asking about themselves exists by construction.
-    if (caller.id !== targetId) {
-      const exists = await repository.userExists(targetId);
-      if (!exists) throw notFound('USER_NOT_FOUND', 'No such user');
-    }
-
-    const { rows, hasMore } = await repository.listOrders({ userId: targetId, limit, cursor });
-
-    res.json({
-      data: rows.map(serializeOrder),
-      page: {
-        next_cursor: hasMore ? encodeCursor(rows[rows.length - 1]) : null,
-        has_more: hasMore,
-      },
-    });
-  } catch (err) {
-    next(err);
+function authorize(caller, targetId) {
+  if (caller.id !== targetId && caller.role !== 'admin') {
+    throw forbidden();
   }
 }
+
+const getUserOrders = asyncHandler(async (req, res) => {
+  const params = paramsSchema.safeParse(req.params);
+  if (!params.success) throw badRequest('User id must be a positive integer');
+  const targetId = params.data.id;
+
+  const query = querySchema.safeParse(req.query);
+  if (!query.success) throw badRequest('Invalid query parameters');
+  const limit = Math.min(Math.max(query.data.limit, 1), config.pagination.maxLimit);
+  const pageCursor = cursor.decode(query.data.cursor);
+
+  authorize(req.caller, targetId); // requirement #4
+
+  const { rows, hasMore } = await repository.listOrders({ userId: targetId, limit, cursor: pageCursor });
+
+  // Requirement #3: "no orders" is a 200 with an empty list, not a 404.
+  // Distinguishing "no orders" from "no such user" needs an extra query, so only
+  // pay for it when it can change the answer: an empty result for someone other
+  // than the caller. A non-empty result proves the user exists; a caller asking
+  // about themselves exists by virtue of holding a valid token.
+  if (rows.length === 0 && req.caller.id !== targetId) {
+    if (!(await repository.userExists(targetId))) {
+      throw notFound('USER_NOT_FOUND', 'No such user');
+    }
+  }
+
+  res.json(serializer.toOrderPage(rows, hasMore));
+});
 
 module.exports = { getUserOrders };

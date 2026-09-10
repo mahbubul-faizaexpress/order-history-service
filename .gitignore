@@ -3,3 +3,6 @@ node_modules/
 *.log
 coverage/
 .DS_Store
+
+# local Bangla translations — not part of the submission
+*.bn.md

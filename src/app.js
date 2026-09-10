@@ -1,33 +1,52 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const express = require('express');
 const pinoHttp = require('pino-http');
 const config = require('./config');
-const { errorHandler } = require('./errors');
+const db = require('./db');
+const { errorHandler, notFound } = require('./errors');
 const ordersRoutes = require('./orders/routes');
-const { prisma } = require('./db');
 
 function buildApp() {
   const app = express();
 
   app.disable('x-powered-by');
-  app.use(pinoHttp({ level: config.logLevel }));
-  app.use(express.json());
+  app.set('trust proxy', true); // behind a load balancer / gateway in any real deploy
 
-  app.get('/health', async (_req, res) => {
+  app.use(
+    pinoHttp({
+      level: config.logLevel,
+      // Reuse an upstream correlation id when the gateway already set one.
+      genReqId: (req, res) => {
+        const existing = req.headers['x-request-id'];
+        const id = existing || crypto.randomUUID();
+        res.setHeader('x-request-id', id);
+        return id;
+      },
+    }),
+  );
+
+  // No body parser: this service is read-only. Adding one would just be attack
+  // surface with nothing to parse.
+
+  // Liveness: is the process up? (no dependencies — a failing DB must not cause
+  // the orchestrator to kill an otherwise healthy pod).
+  app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+
+  // Readiness: can it actually serve traffic? (checks the database).
+  app.get('/health/ready', async (_req, res) => {
     try {
-      await prisma.$queryRaw`SELECT 1`;
-      res.json({ status: 'ok' });
+      await db.ping();
+      res.json({ status: 'ready' });
     } catch {
-      res.status(503).json({ status: 'degraded' });
+      res.status(503).json({ status: 'unavailable' });
     }
   });
 
   app.use('/api', ordersRoutes);
 
-  app.use((_req, res) => {
-    res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Route not found' } });
-  });
+  app.use((_req, _res, next) => next(notFound('ROUTE_NOT_FOUND', 'Route not found')));
   app.use(errorHandler);
 
   return app;
