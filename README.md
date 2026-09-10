@@ -1,81 +1,151 @@
 # Order History Service
 
-`GET /api/users/:id/orders` — returns a user's order history, newest first.
+A single endpoint that returns a user's order history:
 
-Built for the Luminous Labs Senior Node.js take-home. Read **[DECISIONS.md](DECISIONS.md)** first.
+```
+GET /api/users/:id/orders
+```
+
+Newest orders first, cursor-paginated so the response stays flat as an account
+grows, and readable only by the user themselves or an admin.
+
+> Built for the Luminous Labs Senior Node.js take-home.
+> **[DECISIONS.md](DECISIONS.md) is the main document** — assumptions, where AI was
+> overridden, what breaks at scale, and what was deliberately left out.
 
 ---
 
-## Setup (under 5 minutes)
+## Contents
 
-Requires Docker and Node.js 20+.
+- [How the requirements are met](#how-the-requirements-are-met)
+- [Prerequisites](#prerequisites)
+- [Quickstart](#quickstart)
+- [Configuration](#configuration)
+- [Trying the endpoint](#trying-the-endpoint)
+- [API reference](#api-reference)
+- [How pagination works](#how-pagination-works)
+- [Tests](#tests)
+- [Project structure](#project-structure)
+- [Tech stack](#tech-stack)
+
+---
+
+## How the requirements are met
+
+| Requirement | Approach |
+| --- | --- |
+| Orders, newest first | `ORDER BY created_at DESC, id DESC` (`id` breaks ties so paging is stable) |
+| Stays responsive as orders grow | Composite index `(user_id, created_at DESC, id DESC)`, **keyset** pagination (no `OFFSET`), no `COUNT(*)`, `limit` capped at 100 |
+| Users with no orders | `200` with `{ "data": [], "page": { "next_cursor": null, "has_more": false } }` — not a `404` |
+| Only the user, or an admin | `Bearer` JWT → `req.caller`; `401` without a valid token, `403` when the caller is neither the target user nor an admin |
+
+---
+
+## Prerequisites
+
+- **Node.js 20+**
+- **Docker** (for Postgres — nothing else needs installing)
+
+---
+
+## Quickstart
 
 ```bash
-cp .env.example .env
-docker compose up -d            # Postgres on :5432, plus an empty orders_test db
-npm install                     # runs `prisma generate` automatically
-npm run db:setup                # prisma migrate deploy + seeds ~5k users / ~50k orders
-npm start                       # http://localhost:3000
+cp .env.example .env       # 1. config (defaults work as-is)
+docker compose up -d       # 2. Postgres on :5432, plus an empty orders_test db
+npm install                # 3. deps (+ prisma generate)
+npm run db:setup           # 4. migrate + seed ~5k users / ~50k orders
+npm start                  # 5. http://localhost:3000
 ```
 
-If your machine already runs Postgres on 5432, set `POSTGRES_HOST_PORT` in `.env`
-to a free port and update the `*_DATABASE_URL` values to match.
-
-Data access is [Prisma](https://www.prisma.io/) 7 over the `pg` driver adapter.
-The model is in `prisma/schema.prisma`; the CLI connection URL is in
-`prisma.config.mjs` (Prisma 7 keeps it out of the schema); migrations are in
-`prisma/migrations/`, with the CHECK constraints Prisma cannot express in a
-hand-written follow-up migration.
-
-Health check:
+Check it is up:
 
 ```bash
-curl localhost:3000/health
+curl localhost:3000/health          # {"status":"ok"}
 ```
+
+> **Port 5432 already in use?** Set `POSTGRES_HOST_PORT` in `.env` to a free port
+> and change the `5432` in both `*_DATABASE_URL` values to match.
+
+---
+
+## Configuration
+
+All configuration is environment variables (`.env`, copied from `.env.example`):
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `PORT` | `3000` | HTTP port |
+| `POSTGRES_HOST_PORT` | `5432` | Host port the Postgres container binds to |
+| `DATABASE_URL` | `…/orders` | Application database |
+| `TEST_DATABASE_URL` | `…/orders_test` | Database used by `npm test` |
+| `JWT_SECRET` | `dev-only-change-me` | HS256 secret used to verify incoming tokens |
+| `DB_STATEMENT_TIMEOUT_MS` | `5000` | Per-connection statement timeout |
+| `DB_POOL_MAX` | `10` | Connection pool size |
+| `LOG_LEVEL` | `info` | `pino` log level (`silent` during tests) |
 
 ---
 
 ## Trying the endpoint
 
-The endpoint needs a `Bearer` token that says who is calling (`sub` = user id,
-`role` = `customer` or `admin`). In the seed data, **user 1 is an admin** and
-everyone else is a normal customer.
+Every request needs a `Bearer` token identifying the caller (`sub` = user id,
+`role` = `customer` or `admin`). **In the seed data, user 1 is an admin**;
+everyone else is a customer.
 
-### Step 1 — get a token
-
-```bash
-npm run token 2          # token for normal user 2
-npm run token 1 admin    # token for the admin
-```
-
-Each command prints the token and a ready-to-run `curl` line.
-
-### Step 2 — call the endpoint
-
-Copy a token from step 1 into `TOKEN=...`, then:
+### 1. Mint a token
 
 ```bash
-TOKEN=<paste token here>
-
-# user 2's orders, newest first
-curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/users/2/orders
-
-# 5 per page
-curl -H "Authorization: Bearer $TOKEN" "http://localhost:3000/api/users/2/orders?limit=5"
-
-# next page: take "next_cursor" from the previous response and pass it back
-curl -H "Authorization: Bearer $TOKEN" "http://localhost:3000/api/users/2/orders?limit=5&cursor=PASTE_NEXT_CURSOR"
+npm run token 2          # a normal user
+npm run token 1 admin    # the admin
 ```
 
-### Easier: click-to-run in VS Code
+Each command prints the token plus a ready-to-run `curl` line.
 
-Open **[api.http](api.http)**, install the "REST Client" extension when prompted,
-paste your two tokens at the top, and click **Send Request** above any request.
-It covers every case — own orders, paging, admin access, 403, empty user, 401.
+### 2. Call the endpoint
+
+```bash
+TOKEN=<paste a token from step 1>
+
+# user 2's most recent orders
+curl -H "Authorization: Bearer $TOKEN" \
+  http://localhost:3000/api/users/2/orders
+
+# five per page
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:3000/api/users/2/orders?limit=5"
+
+# the next page — pass back next_cursor from the previous response
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:3000/api/users/2/orders?limit=5&cursor=<next_cursor>"
+```
+
+### Or: click-to-run in VS Code
+
+Open **[api.http](api.http)**, install the **REST Client** extension when
+prompted, paste your two tokens at the top, and click **Send Request** above any
+request. It walks through every case: own orders, paging, admin access, `403`,
+empty user, `401`.
 
 ---
 
-## Response shape
+## API reference
+
+### `GET /api/users/:id/orders`
+
+**Headers**
+
+| Header | Required | Notes |
+| --- | --- | --- |
+| `Authorization: Bearer <jwt>` | yes | HS256, signed with `JWT_SECRET` |
+
+**Query parameters**
+
+| Param | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `limit` | integer | `20` | clamped to `1`–`100` |
+| `cursor` | string | — | opaque value from a previous `next_cursor` |
+
+**`200` response**
 
 ```json
 {
@@ -95,17 +165,44 @@ It covers every case — own orders, paging, admin access, 403, empty user, 401.
 }
 ```
 
-Pass `next_cursor` back as `?cursor=` for the following page. `has_more: false` and
-`next_cursor: null` mean the end has been reached. Users with no orders return
-`data: []` with a `200`.
+- `total_amount` is a **string** — it is a `DECIMAL`, never sent through a float.
+- `has_more: false` / `next_cursor: null` means the end has been reached.
+
+**Status codes**
 
 | Status | When |
-|--------|------|
-| 200 | orders returned (possibly empty) |
-| 400 | `:id` not a positive integer, or malformed `cursor` |
-| 401 | missing or invalid Bearer token |
-| 403 | caller is neither the target user nor an admin |
-| 404 | admin requested a user that does not exist |
+| --- | --- |
+| `200` | orders returned (the list may be empty) |
+| `400` | `:id` is not a positive integer, or `cursor` is malformed |
+| `401` | missing or invalid `Bearer` token |
+| `403` | caller is neither the target user nor an admin |
+| `404` | an admin requested a user that does not exist |
+
+Error bodies are uniform:
+
+```json
+{ "error": { "code": "FORBIDDEN", "message": "You may not view these orders" } }
+```
+
+---
+
+## How pagination works
+
+Pages are **keyset** ("seek"), not `OFFSET`. The cursor encodes the sort key of
+the last row returned — `(created_at, id)`, base64url of `"<iso>|<id>"` — and the
+next page asks for everything strictly after it:
+
+```sql
+WHERE user_id = $1
+  AND (created_at < $cursorTs OR (created_at = $cursorTs AND id < $cursorId))
+ORDER BY created_at DESC, id DESC
+LIMIT $limit + 1        -- the extra row tells us has_more
+```
+
+This maps straight onto `idx_orders_user_created`, so page 1 and page 10 000 cost
+the same. `OFFSET` would re-scan and discard every skipped row. There is no total
+count in the response for the same reason — counting a large account's orders on
+every request is the thing that gets slow first (see DECISIONS.md §3).
 
 ---
 
@@ -115,35 +212,64 @@ Pass `next_cursor` back as `?cursor=` for the following page. `has_more: false` 
 npm test
 ```
 
-Runs against `TEST_DATABASE_URL` (the `orders_test` database created by
-`docker compose up`). The suite rebuilds the schema and inserts its own fixtures;
-it does not touch the seeded development data.
+`node:test` + `supertest`, run against `TEST_DATABASE_URL`. The suite migrates
+that database, inserts its own small fixtures, and never touches the seeded
+development data. Coverage:
+
+- orders come back newest-first
+- a user with no orders → `200` + `[]`
+- keyset paging visits every order exactly once, in order, across pages
+- caller views own orders → `200`; another user → `403`; admin → `200`
+- missing / invalid token → `401`
+- non-integer `:id` → `400`; oversized `limit` → clamped; bad `cursor` → `400`
+- admin views a non-existent user → `404`
 
 ---
 
-## Layout
+## Project structure
 
 ```
-api.http          click-to-run requests for VS Code REST Client
-prisma.config.mjs  Prisma 7 CLI config (connection URL for migrate/studio)
-prisma/
-  schema.prisma   models (mapped to snake_case tables)
-  migrations/     init + hand-written CHECK constraints
-db/
-  seed.js         ~5k users / ~50k orders, skewed order counts
-  migrate-test.js  pretest hook: migrate the test database
-scripts/
-  token.js        prints a test JWT (`npm run token`)
 src/
-  app.js          express app factory (imported by tests)
-  server.js       listen + graceful shutdown
-  db.js           PrismaClient + pg adapter (pool size, statement_timeout)
-  auth.js         Bearer JWT -> req.caller
-  errors.js       AppError + central handler
+  server.js          listen + graceful shutdown (SIGTERM → drain pool)
+  app.js             buildApp() → Express instance (imported by tests)
+  config.js          env parsing / validation
+  db.js              PrismaClient + pg adapter (pool size, statement_timeout)
+  auth.js            Bearer JWT → req.caller { id, role }
+  errors.js          AppError + central error handler
   orders/
-    routes.js     GET /users/:id/orders
-    controller.js  authz, validation, serialization
-    repository.js  keyset pagination via Prisma
-    cursor.js     (created_at, id) <-> opaque token
-test/     node:test + supertest
+    routes.js        GET /users/:id/orders
+    controller.js    authorization, validation, serialization
+    repository.js    keyset query
+    cursor.js        (created_at, id) ⇄ opaque token
+
+prisma/
+  schema.prisma      User / Order models, mapped to snake_case tables
+  migrations/         init + hand-written CHECK constraints
+prisma.config.mjs    Prisma 7 CLI connection URL (kept out of the schema)
+
+db/
+  seed.js            ~5k users / ~50k orders, order counts deliberately skewed
+  migrate-test.js    pretest hook — migrates the test database
+scripts/
+  token.js           npm run token [id] [role]
+api.http             click-to-run requests for the VS Code REST Client
+test/                node:test + supertest
 ```
+
+---
+
+## Tech stack
+
+| Area | Choice |
+| --- | --- |
+| Runtime | Node.js 20+, Express 4 |
+| Database | PostgreSQL 16 (Docker) |
+| Data access | Prisma 7 over the `pg` driver adapter — models typed, migrations versioned |
+| Auth | `jsonwebtoken` (HS256 Bearer) |
+| Validation | `zod` (path + query only) |
+| Logging | `pino` / `pino-http` |
+| Tests | `node:test` + `supertest` |
+
+Why Prisma rather than raw SQL, why the keyset predicate is hand-written rather
+than `prisma.cursor`, and what that costs — all in
+**[DECISIONS.md](DECISIONS.md) §2**.
