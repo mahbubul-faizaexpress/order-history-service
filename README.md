@@ -27,6 +27,7 @@ grows, and readable only by the user themselves or an admin.
 - [Tests](#tests)
 - [Project structure](#project-structure)
 - [Tech stack](#tech-stack)
+- [Design decisions](#design-decisions)
 
 ---
 
@@ -35,7 +36,7 @@ grows, and readable only by the user themselves or an admin.
 | Requirement | Approach |
 | --- | --- |
 | Orders, newest first | `ORDER BY created_at DESC, id DESC` (`id` breaks ties so paging is stable) |
-| Stays responsive as orders grow | Composite index `(user_id, created_at DESC, id DESC)`, **keyset** pagination (no `OFFSET`), no `COUNT(*)`, `limit` capped at 100 |
+| Stays responsive as orders grow | Composite index `(user_id, created_at DESC, id DESC)`, **keyset** pagination (not offset-based), no `COUNT(*)`, `limit` capped at 100 |
 | Users with no orders | `200` with `{ "data": [], "page": { "next_cursor": null, "has_more": false } }` — not a `404` |
 | Only the user, or an admin | `Bearer` JWT → `req.caller`; `401` without a valid token, `403` when the caller is neither the target user nor an admin |
 
@@ -77,10 +78,10 @@ All configuration is environment variables (`.env`, copied from `.env.example`):
 | --- | --- | --- |
 | `PORT` | `3000` | HTTP port |
 | `POSTGRES_HOST_PORT` | `5432` | Host port the Postgres container binds to |
-| `DATABASE_URL` | `…/orders` | Application database |
-| `TEST_DATABASE_URL` | `…/orders_test` | Database used by `npm test` |
+| `DATABASE_URL` | points at the `orders` db | Application database |
+| `TEST_DATABASE_URL` | points at the `orders_test` db | Database used by `npm test` |
 | `JWT_SECRET` | `dev-only-change-me` | HS256 secret used to verify incoming tokens |
-| `DB_STATEMENT_TIMEOUT_MS` | `5000` | Per-connection statement timeout |
+| `DB_STATEMENT_TIMEOUT_MS` | `5000` | Per-connection statement timeout (ms) |
 | `DB_POOL_MAX` | `10` | Connection pool size |
 | `LOG_LEVEL` | `info` | `pino` log level (`silent` during tests) |
 
@@ -104,7 +105,7 @@ Each command prints the token plus a ready-to-run `curl` line.
 ### 2. Call the endpoint
 
 ```bash
-TOKEN=<paste a token from step 1>
+TOKEN=PASTE_A_TOKEN_FROM_STEP_1
 
 # user 2's most recent orders
 curl -H "Authorization: Bearer $TOKEN" \
@@ -116,7 +117,7 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 # the next page — pass back next_cursor from the previous response
 curl -H "Authorization: Bearer $TOKEN" \
-  "http://localhost:3000/api/users/2/orders?limit=5&cursor=<next_cursor>"
+  "http://localhost:3000/api/users/2/orders?limit=5&cursor=PASTE_NEXT_CURSOR"
 ```
 
 ### Or: click-to-run in VS Code
@@ -142,7 +143,7 @@ empty user, `401`.
 
 | Param | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `limit` | integer | `20` | clamped to `1`–`100` |
+| `limit` | integer | `20` | clamped to the range 1 to 100 |
 | `cursor` | string | — | opaque value from a previous `next_cursor` |
 
 **`200` response**
@@ -188,9 +189,9 @@ Error bodies are uniform:
 
 ## How pagination works
 
-Pages are **keyset** ("seek"), not `OFFSET`. The cursor encodes the sort key of
-the last row returned — `(created_at, id)`, base64url of `"<iso>|<id>"` — and the
-next page asks for everything strictly after it:
+Pages are **keyset** ("seek"), not offset-based. The cursor encodes the sort key
+of the last row returned — `(created_at, id)`, base64url of `"<iso>|<id>"` — and
+the next page asks for everything strictly after it:
 
 ```sql
 WHERE user_id = $1
@@ -199,10 +200,16 @@ ORDER BY created_at DESC, id DESC
 LIMIT $limit + 1        -- the extra row tells us has_more
 ```
 
-This maps straight onto `idx_orders_user_created`, so page 1 and page 10 000 cost
-the same. `OFFSET` would re-scan and discard every skipped row. There is no total
-count in the response for the same reason — counting a large account's orders on
-every request is the thing that gets slow first (see DECISIONS.md §3).
+This maps straight onto `idx_orders_user_created`, so page 1 and page 10,000 cost
+the same. Skipping rows with `OFFSET` would re-scan and discard everything before
+the current page. There is no total count in the response for the same reason —
+counting a large account's orders on every request is the thing that gets slow
+first (see [DECISIONS.md](DECISIONS.md) → *What breaks first at 100×*).
+
+> The query is built with Prisma's query API, not its built-in `cursor`/`skip`
+> helper — that helper keys on a single field and would skip or repeat rows that
+> share a timestamp. Prisma still appends a constant `OFFSET 0` to the SQL; it is
+> a no-op. Full reasoning in [DECISIONS.md](DECISIONS.md) → *What I used AI for*.
 
 ---
 
@@ -240,7 +247,7 @@ src/
     routes.js        GET /users/:id/orders
     controller.js    authorization, validation, serialization
     repository.js    keyset query
-    cursor.js        (created_at, id) ⇄ opaque token
+    cursor.js        encodes / decodes the (created_at, id) cursor token
 
 prisma/
   schema.prisma      User / Order models, mapped to snake_case tables
@@ -270,6 +277,14 @@ test/                node:test + supertest
 | Logging | `pino` / `pino-http` |
 | Tests | `node:test` + `supertest` |
 
-Why Prisma rather than raw SQL, why the keyset predicate is hand-written rather
-than `prisma.cursor`, and what that costs — all in
-**[DECISIONS.md](DECISIONS.md) §2**.
+---
+
+## Design decisions
+
+The reasoning behind the choices above — and the ones the spec left open — is in
+**[DECISIONS.md](DECISIONS.md)**, which answers four questions:
+
+1. **What the requirements did not tell me** — every assumption, with the riskiest one flagged.
+2. **What I used AI for, and where I overrode it** — including why the data layer is Prisma and why the keyset predicate is written by hand.
+3. **What breaks first at 100× the data** — the specific failure, and how to catch it before a customer does.
+4. **What I deliberately did not build** — and why each omission was a choice.
