@@ -75,11 +75,17 @@ Postgres ................. idx_orders_user_created does the work
    is non-deterministic and keyset pagination drops or repeats rows at page
    boundaries. The index carries the tiebreak column for this reason.
 
-8. **Schema and seed.** The brief says both are "provided"; they were not in the
-   package I received. `prisma/schema.prisma` and `db/seed.js` are my
-   reconstruction at the stated size (~5k users, ~50k orders, order counts
-   deliberately skewed so a handful of accounts are large). If the real schema
-   differs, only the model names need reconciling — the migration regenerates.
+8. **Schema and seed.** No schema or seed was supplied, so I designed both:
+   `prisma/schema.prisma` (two tables, `users` and `orders`) and `db/seed.js` at
+   the size the brief names — ~5,000 users, ~50,000 orders, per-user order counts
+   deliberately skewed so a handful of accounts are large enough to make
+   pagination matter. I kept the model deliberately minimal — no line items,
+   addresses or payment data — because none of it is needed to answer the four
+   requirements and inventing it would be scope I can't justify. `npm run db:setup`
+   creates and seeds everything; there is nothing external to load. If a real
+   schema turns out to differ, the query touches only `user_id`, `created_at`,
+   `id`, `status`, `total_amount`, `currency` — reconciling names is a small edit
+   in one model file and the migration regenerates.
 
 9. **Single currency per order, stored as a plain column.** No FX, no minor-unit
    integers. Fine at this scale; flagged in §4.

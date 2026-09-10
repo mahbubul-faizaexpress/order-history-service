@@ -11,11 +11,12 @@
     "postinstall": "prisma generate",
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "db:setup": "prisma generate && prisma migrate deploy && npm run db:seed",
+    "db:setup": "node db/wait-for-db.js && prisma generate && prisma migrate deploy && npm run db:seed",
     "db:seed": "node db/seed.js",
     "db:studio": "prisma studio",
+    "db:reset": "prisma migrate reset --force && npm run db:seed",
     "token": "node scripts/token.js",
-    "pretest": "node db/migrate-test.js",
+    "pretest": "node db/wait-for-db.js --test && node db/migrate-test.js",
     "test": "node --test \"test/**/*.test.js\""
   },
   "dependencies": {

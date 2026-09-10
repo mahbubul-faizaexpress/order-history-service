@@ -52,12 +52,17 @@ grows, and readable only by the user themselves or an admin.
 ## Quickstart
 
 ```bash
-cp .env.example .env       # 1. config (defaults work as-is)
-docker compose up -d       # 2. Postgres on :5432, plus an empty orders_test db
-npm install                # 3. deps (+ prisma generate)
-npm run db:setup           # 4. migrate + seed ~5k users / ~50k orders
-npm start                  # 5. http://localhost:3000
+cp .env.example .env         # 1. config (defaults work as-is)
+docker compose up -d --wait  # 2. Postgres on :5432, plus an empty orders_test db
+npm install                  # 3. deps (+ prisma generate)
+npm run db:setup             # 4. create the schema + seed ~5k users / ~50k orders
+npm start                    # 5. http://localhost:3000
 ```
+
+The schema and seed are **part of this repo** — no external SQL file to load.
+`db:setup` waits for Postgres, applies `prisma/migrations/`, and runs `db/seed.js`
+to produce ~5,000 users (user 1 is an admin) and ~50,000 orders with deliberately
+uneven per-user counts. Re-run `npm run db:reset` any time to start clean.
 
 Check it is up:
 
@@ -267,6 +272,7 @@ prisma.config.mjs    Prisma 7 CLI connection URL (kept out of the schema)
 
 db/
   seed.js            ~5k users / ~50k orders, order counts deliberately skewed
+  wait-for-db.js     blocks until Postgres accepts connections
   migrate-test.js    pretest hook — migrates the test database
 scripts/
   token.js           npm run token [id] [role]
