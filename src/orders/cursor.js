@@ -9,7 +9,7 @@ const { badRequest } = require('../errors');
 
 function encodeCursor(row) {
   if (!row) return null;
-  const raw = `${new Date(row.created_at).toISOString()}|${row.id}`;
+  const raw = `${new Date(row.createdAt).toISOString()}|${row.id}`;
   return Buffer.from(raw, 'utf8').toString('base64url');
 }
 

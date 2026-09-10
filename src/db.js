@@ -1,25 +1,21 @@
 'use strict';
 
-const { Pool } = require('pg');
+const { PrismaClient } = require('@prisma/client');
 const config = require('./config');
 
-// One shared pool for the process. statement_timeout is applied to every
-// connection so a runaway query cannot hold a pool slot forever (DECISIONS.md Q3).
-const pool = new Pool({
-  connectionString: config.databaseUrl,
-  max: config.dbPoolMax,
-  idleTimeoutMillis: 30000,
-  connectionTimeoutMillis: 5000,
-  statement_timeout: config.dbStatementTimeoutMs,
+// One PrismaClient per process (it owns its own connection pool).
+// statement_timeout is pushed down via the connection string so a runaway query
+// cannot hold a pool connection forever (see DECISIONS.md Q3).
+const url = new URL(config.databaseUrl);
+url.searchParams.set('connection_limit', String(config.dbPoolMax));
+url.searchParams.set(
+  'options',
+  `-c statement_timeout=${config.dbStatementTimeoutMs}`,
+);
+
+const prisma = new PrismaClient({
+  datasources: { db: { url: url.toString() } },
+  log: config.logLevel === 'silent' ? [] : ['warn', 'error'],
 });
 
-pool.on('error', (err) => {
-  // an idle client threw — log, do not crash the process
-  // eslint-disable-next-line no-console
-  console.error('idle pg client error', err.message);
-});
-
-module.exports = {
-  query: (text, params) => pool.query(text, params),
-  pool,
-};
+module.exports = { prisma };

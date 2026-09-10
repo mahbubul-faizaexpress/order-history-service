@@ -17,11 +17,12 @@ const querySchema = z.object({
 
 function serializeOrder(row) {
   return {
-    id: Number(row.id),
+    id: Number(row.id), // BigInt -> Number; safe well past any realistic order id
     status: row.status,
-    total_amount: row.total_amount, // NUMERIC -> string, keeps exact cents
+    // Prisma Decimal -> string, so exact cents survive (never through a JS float)
+    total_amount: row.totalAmount.toFixed(2),
     currency: row.currency,
-    created_at: new Date(row.created_at).toISOString(),
+    created_at: row.createdAt.toISOString(),
   };
 }
 

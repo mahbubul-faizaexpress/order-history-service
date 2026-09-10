@@ -40,20 +40,21 @@ fill a gap, and why I filled it the way I did.
 
 6. **Response fields.** `id, status, total_amount, currency, created_at`. I
    excluded anything I would have to guess at (line items, addresses, payment
-   refs). `total_amount` is returned as a **string** because it is `NUMERIC` —
-   serializing through a JS `number` would silently round large or fractional
-   amounts.
+   refs). `total_amount` is returned as a **string** (`Decimal(12,2)` in the
+   schema, `Prisma.Decimal` at runtime) — serializing it through a JS `number`
+   would silently round large or fractional amounts.
 
 7. **Tiebreak on equal `created_at` is `id` descending.** Seeded/imported data
    routinely shares timestamps to the second. Without a unique tiebreak the sort
    is non-deterministic and keyset pagination drops or repeats rows at page
    boundaries.
 
-8. **Data size.** The handout says a schema and seed are "provided"; they were not
-   in the package I received. `db/schema.sql` and `db/seed.js` are my
+8. **Data size and schema.** The handout says a schema and seed are "provided";
+   they were not in the package I received. `prisma/schema.prisma` (two models,
+   mapped to snake_case `users` / `orders` tables) and `db/seed.js` are my
    reconstruction at the stated size (~5k users, ~50k orders, order counts
-   deliberately skewed). If the real schema differs, only column names need
-   reconciling.
+   deliberately skewed). If the real schema differs, only names need reconciling
+   in the Prisma model — the migration re-generates from it.
 
 9. **Currency is a plain column, single-currency per order.** No FX, no minor-unit
    integer storage. Fine at this scale; called out in §4.
@@ -65,39 +66,54 @@ fill a gap, and why I filled it the way I did.
 I used Claude (Claude Code) to generate the scaffold end to end, then corrected it.
 Specific overrides:
 
-1. **Cursor key.** The first cut encoded the cursor as just the last row's `id`
-   and paginated with `WHERE id < $cursor`. That is wrong for a `created_at`-
-   ordered list: `id` order and `created_at` order are not the same, so pages
-   would skip and repeat rows. I changed the cursor to carry **both**
-   `(created_at, id)` and the query to the row-value comparison
-   `(created_at, id) < ($ts, $id)`, which matches the composite index exactly.
+1. **Raw `pg` → Prisma.** The first scaffold used `pg` with hand-written SQL. I
+   moved the data layer to Prisma: the schema becomes a single typed source of
+   truth, migrations are generated and version-controlled, and the query in
+   `repository.js` is checked against the model at build time rather than being a
+   string. The trade-offs I accepted are in §4. This is a stack choice I own and
+   can defend either way — for one endpoint raw SQL is also entirely reasonable.
 
-2. **`OFFSET` vs keyset.** The initial repository used `LIMIT $n OFFSET $m`. That
-   is O(offset) — page 5,000 of a whale account scans and discards a million rows.
-   Replaced with keyset (constant cost per page). This is the whole point of
-   requirement #2, so it was not a detail to leave to the generator.
+2. **Prisma's built-in cursor pagination is not enough — kept an explicit keyset
+   predicate.** `prisma.findMany({ cursor, skip: 1 })` keys on one unique field.
+   With a compound `created_at, id` sort it effectively walks `id` order, so rows
+   sharing a timestamp get skipped or repeated across a page boundary. AI's first
+   Prisma version used it. I replaced it with an explicit
+   `WHERE created_at < $ts OR (created_at = $ts AND id < $id)` built through the
+   query API, and a cursor that carries **both** `(created_at, id)`. Verified with
+   `EXPLAIN` that this still drives `idx_orders_user_created` (§3).
 
-3. **`COUNT(*)` for a total.** The generated response included
-   `page.total = SELECT count(*) WHERE user_id`. On a large account that is an
-   index-only scan of every matching row on every request. I removed it; the
-   response exposes `has_more` (derived from fetching `limit + 1` rows) and
-   nothing that requires counting.
+3. **`OFFSET` vs keyset.** The raw-SQL draft used `LIMIT $n OFFSET $m`; Prisma's
+   `skip` is the same trap. O(offset) — page 5,000 of a whale account scans and
+   discards a million rows. Keyset is constant cost per page. This is the whole
+   point of requirement #2.
 
-4. **Existence check on every request.** The draft ran
-   `SELECT 1 FROM users WHERE id = $1` unconditionally. I scoped it to the only
-   case that needs it (caller ≠ target), removing one round trip from the hot path
-   (a user reading their own history).
+4. **`COUNT(*)` for a total.** The generated response included a
+   `page.total`. On a large account that counts every matching row on every
+   request. Removed; the response exposes `has_more`, derived from fetching
+   `limit + 1` rows, and nothing that requires a count.
 
-5. **Seed script.** Generated as a `for` loop of single-row `INSERT`s — ~50,000
-   network round trips, minutes of runtime. Rewrote as batched 1,000-row
-   multi-`VALUES` inserts inside one transaction, plus an `ANALYZE` at the end so
-   the planner has stats immediately.
+5. **Existence check on every request.** The draft queried the user row
+   unconditionally. I scoped it to the only case that needs it (caller ≠ target),
+   removing one round trip from the hot path — a user reading their own history.
 
-6. **`statement_timeout`.** Not in the generated code. Added it per pooled
-   connection so a pathological query cannot pin a pool slot forever (see §3).
+6. **CHECK constraints.** Prisma's schema language cannot express them, and AI's
+   version simply dropped the `role` / `status` / `total_amount >= 0` checks. I
+   added them back in a hand-written follow-up migration
+   (`20260910124500_add_check_constraints`) — they are data invariants, not app
+   validation, so they belong in the database.
 
-7. **Float money.** The generated serializer did `Number(row.total_amount)`. Left
-   it as the `NUMERIC` string instead.
+7. **Seed script.** Generated as a `for` loop of single-row inserts — ~50,000
+   round trips. Rewrote using `createMany` in 5,000-row chunks, plus an `ANALYZE`
+   at the end so the planner has stats immediately.
+
+8. **`statement_timeout`.** Not in the generated code. Pushed it into the Prisma
+   connection string (`options=-c statement_timeout=…`) so a pathological query
+   cannot pin a pool connection forever (§3).
+
+9. **`Decimal` / `BigInt` serialization.** Prisma returns `id` as `BigInt` and
+   `total_amount` as `Prisma.Decimal`; `JSON.stringify` throws on the first and
+   the generated serializer coerced the second through a float. The serializer now
+   does `Number(id)` and `decimal.toFixed(2)` explicitly.
 
 ---
 
@@ -106,30 +122,38 @@ Specific overrides:
 100× ≈ **5,000,000 orders, ~500,000 users**.
 
 The paginated query itself does **not** break — keyset + `idx_orders_user_created`
-keeps every page a bounded index range scan regardless of account size or page
-depth. That was the design goal and it holds. On the seeded data (`EXPLAIN
-ANALYZE` on a whale account):
+keeps every page a bounded index scan regardless of account size or page depth.
+That was the design goal and it holds. `EXPLAIN ANALYZE` on the SQL Prisma emits
+for a whale account, mid-pagination:
 
 ```
-Limit  (actual time=0.022..0.035 rows=21 loops=1)
+Limit  (actual time=0.046..0.056 rows=21 loops=1)
   ->  Index Scan using idx_orders_user_created on orders
-        Index Cond: ((user_id = 2) AND (ROW(created_at, id) < ROW(now(), ...)))
-Execution Time: 0.124 ms
+        Index Cond: (user_id = 2)
+        Filter: ((created_at < now()) OR ((created_at = now()) AND (id < 999999)))
+Execution Time: 0.133 ms
 ```
 
-No sort node, no heap scan beyond the 21 rows returned.
+No sort node, no heap scan beyond the rows returned. Note the boundary is a
+`Filter`, not part of the `Index Cond`: Prisma's query API cannot emit the
+row-value form `(created_at, id) < ($ts, $id)` that would fold it into the index
+condition. The scan still walks the index in order and stops at `LIMIT`, so cost
+is bounded, but a handful of extra index tuples are examined right at the page
+boundary. If that ever showed up in a profile, this one query drops to
+`prisma.$queryRaw` with the tuple comparison. The first page (no cursor) has no
+`Filter` at all.
 
-**What breaks first: pg connection-pool saturation, and the timeout cascade behind
+**What breaks first: connection-pool saturation, and the timeout cascade behind
 it.**
 
-The pool is fixed (`DB_POOL_MAX`, default 10). At 100× the same endpoint is also
-serving 100× the traffic, and it now shares the database with 100× everyone
-else's load — reporting queries, backfills, an unindexed query someone shipped
-last week. Mean latency on *our* query drifts from ~2 ms to ~30–50 ms under that
-contention. At that point:
+Prisma's pool is fixed (`connection_limit`, set from `DB_POOL_MAX`, default 10).
+At 100× the same endpoint is also serving 100× the traffic, and it now shares the
+database with 100× everyone else's load — reporting queries, backfills, an
+unindexed query someone shipped last week. Mean latency on *our* query drifts from
+~2 ms to ~30–50 ms under that contention. At that point:
 
 - in-flight requests × latency exceeds the 10 pool slots,
-- new requests queue on `connectionTimeoutMillis` (5 s), then error,
+- new requests wait on Prisma's `pool_timeout` (default 10 s), then throw `P2024`,
 - the load balancer retries, adding load,
 - p95 goes from 40 ms to multiple seconds, then 503s.
 
@@ -140,8 +164,9 @@ classic "it was fine in staging" failure.
 
 - **p95/p99 latency alert per route** (not just an average) — the average stays
   fine long after the tail has broken.
-- **Pool telemetry**: `pool.waitingCount` and `pool.idleCount` exported to
-  metrics; alert when `waitingCount > 0` for more than a few seconds.
+- **Pool telemetry**: Prisma's `prisma_pool_connections_busy` /
+  `_idle` and `prisma_client_queries_wait` metrics (via `prisma.$metrics`)
+  exported to Prometheus; alert when queries are waiting for a connection.
 - **`pg_stat_statements`** — watch `mean_exec_time` and `stddev_exec_time` for the
   history query specifically; a rising stddev is the early signal that the DB is
   contended even before our mean moves much.
@@ -191,8 +216,15 @@ Each of these was a conscious cut, not an oversight.
   exactly two roles and one rule. `auth.js` is deliberately the thinnest thing
   that satisfies it and is the first file to be replaced in a real system.
 
-- **Migration tooling.** One table set; `schema.sql` applied once is enough. A
-  second table would justify `node-pg-migrate`.
+- **Prisma's `cursor` / `skip` pagination** — replaced with an explicit keyset
+  predicate (§2). Also **not** used: Prisma `$transaction` for the seed (the
+  chunked `createMany` is enough and faster), Prisma Migrate in a CI gate, and
+  Prisma's `relationMode` — foreign keys are enforced by Postgres directly.
+
+- **Fighting Prisma over the raw-SQL fast path.** If more read endpoints landed
+  and the query-builder verbosity or the row-value limitation added up, I would
+  move the hot queries to a thin repository of `$queryRaw` calls and keep Prisma
+  for writes and schema. Not worth it for one endpoint.
 
 - **OpenAPI spec, request tracing (OTel), Dockerfile for the app itself.** Time
   budget. The README covers the run path; the response shapes are small enough to

@@ -1,0 +1,39 @@
+// Assumed schema. The assignment says one is "provided" but it was not in the
+// handout; if the real one differs, only names need reconciling here.
+//
+// Models map onto snake_case table/column names so the database looks the same
+// whether it is read through Prisma or with psql.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id        BigInt   @id @default(autoincrement())
+  email     String   @unique
+  role      String   @default("customer") // 'customer' | 'admin' (CHECK added in migration)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  orders    Order[]
+
+  @@map("users")
+}
+
+model Order {
+  id          BigInt   @id @default(autoincrement())
+  userId      BigInt   @map("user_id")
+  status      String // pending|paid|shipped|delivered|cancelled (CHECK added in migration)
+  totalAmount Decimal  @map("total_amount") @db.Decimal(12, 2)
+  currency    String   @default("BDT")
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  user        User     @relation(fields: [userId], references: [id])
+
+  // Requirement #2: serves WHERE user_id + ORDER BY (created_at, id) DESC directly,
+  // so a page costs the same no matter how many orders the user has.
+  @@index([userId, createdAt(sort: Desc), id(sort: Desc)], map: "idx_orders_user_created")
+  @@map("orders")
+}

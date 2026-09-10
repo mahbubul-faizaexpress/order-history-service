@@ -13,10 +13,17 @@ Requires Docker and Node.js 20+.
 ```bash
 cp .env.example .env
 docker compose up -d            # Postgres on :5432, plus an empty orders_test db
-npm install
-npm run db:setup                # applies db/schema.sql and seeds ~5k users / ~50k orders
+npm install                     # runs `prisma generate` automatically
+npm run db:setup                # prisma migrate deploy + seeds ~5k users / ~50k orders
 npm start                       # http://localhost:3000
 ```
+
+If your machine already runs Postgres on 5432, set `POSTGRES_HOST_PORT` in `.env`
+to a free port and update the `*_DATABASE_URL` values to match.
+
+Data access is [Prisma](https://www.prisma.io/) (`prisma/schema.prisma`).
+Migrations live in `prisma/migrations/`; the CHECK constraints Prisma cannot
+express are in a hand-written follow-up migration.
 
 Health check:
 
@@ -106,17 +113,22 @@ it does not touch the seeded development data.
 ## Layout
 
 ```
-db/       schema.sql, seed, one-shot setup script
+prisma/
+  schema.prisma   models (mapped to snake_case tables)
+  migrations/     init + hand-written CHECK constraints
+db/
+  seed.js         ~5k users / ~50k orders, skewed order counts
+  migrate-test.js  pretest hook: migrate the test database
 src/
   app.js          express app factory (imported by tests)
   server.js       listen + graceful shutdown
-  db.js           pg pool, per-connection statement_timeout
+  db.js           PrismaClient singleton, statement_timeout via connection string
   auth.js         Bearer JWT -> req.caller
   errors.js       AppError + central handler
   orders/
     routes.js     GET /users/:id/orders
     controller.js  authz, validation, serialization
-    repository.js  keyset SQL
+    repository.js  keyset pagination via Prisma
     cursor.js     (created_at, id) <-> opaque token
 test/     node:test + supertest
 ```

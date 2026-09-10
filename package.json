@@ -8,22 +8,26 @@
     "node": ">=20"
   },
   "scripts": {
+    "postinstall": "prisma generate",
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "db:setup": "node db/setup.js",
+    "db:setup": "prisma migrate deploy && npm run db:seed",
     "db:seed": "node db/seed.js",
+    "db:studio": "prisma studio",
+    "pretest": "node db/migrate-test.js",
     "test": "node --test \"test/**/*.test.js\""
   },
   "dependencies": {
+    "@prisma/client": "^6.1.0",
     "dotenv": "^16.4.5",
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
-    "pg": "^8.13.1",
     "pino": "^9.5.0",
     "pino-http": "^10.3.0",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "prisma": "^6.1.0",
     "supertest": "^7.0.0"
   }
 }
