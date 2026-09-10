@@ -21,9 +21,11 @@ npm start                       # http://localhost:3000
 If your machine already runs Postgres on 5432, set `POSTGRES_HOST_PORT` in `.env`
 to a free port and update the `*_DATABASE_URL` values to match.
 
-Data access is [Prisma](https://www.prisma.io/) (`prisma/schema.prisma`).
-Migrations live in `prisma/migrations/`; the CHECK constraints Prisma cannot
-express are in a hand-written follow-up migration.
+Data access is [Prisma](https://www.prisma.io/) 7 over the `pg` driver adapter.
+The model is in `prisma/schema.prisma`; the CLI connection URL is in
+`prisma.config.mjs` (Prisma 7 keeps it out of the schema); migrations are in
+`prisma/migrations/`, with the CHECK constraints Prisma cannot express in a
+hand-written follow-up migration.
 
 Health check:
 
@@ -123,6 +125,7 @@ it does not touch the seeded development data.
 
 ```
 api.http          click-to-run requests for VS Code REST Client
+prisma.config.mjs  Prisma 7 CLI config (connection URL for migrate/studio)
 prisma/
   schema.prisma   models (mapped to snake_case tables)
   migrations/     init + hand-written CHECK constraints
@@ -134,7 +137,7 @@ scripts/
 src/
   app.js          express app factory (imported by tests)
   server.js       listen + graceful shutdown
-  db.js           PrismaClient singleton, statement_timeout via connection string
+  db.js           PrismaClient + pg adapter (pool size, statement_timeout)
   auth.js         Bearer JWT -> req.caller
   errors.js       AppError + central handler
   orders/

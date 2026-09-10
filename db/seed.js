@@ -6,15 +6,13 @@
 //
 // Usage: node db/seed.js        (uses DATABASE_URL)
 
-const { PrismaClient } = require('@prisma/client');
 require('dotenv').config();
+const { prisma } = require('../src/db');
 
 const USER_COUNT = 5000;
 const TARGET_ORDERS = 50000;
 const STATUSES = ['pending', 'paid', 'shipped', 'delivered', 'cancelled'];
 const CHUNK = 5000;
-
-const prisma = new PrismaClient();
 
 function pick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];

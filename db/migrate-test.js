@@ -15,7 +15,11 @@ if (!testUrl) {
 // Invoke the Prisma CLI entry point with the current node binary, so this works
 // the same on Windows and POSIX without a shell.
 const prismaCli = require.resolve('prisma/build/index.js');
-execFileSync(process.execPath, [prismaCli, 'migrate', 'deploy'], {
-  stdio: 'inherit',
-  env: { ...process.env, DATABASE_URL: testUrl },
-});
+const run = (args) =>
+  execFileSync(process.execPath, [prismaCli, ...args], {
+    stdio: 'inherit',
+    env: { ...process.env, DATABASE_URL: testUrl },
+  });
+
+run(['generate']); // no-op if the client is already built
+run(['migrate', 'deploy']);

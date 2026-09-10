@@ -66,12 +66,17 @@ fill a gap, and why I filled it the way I did.
 I used Claude (Claude Code) to generate the scaffold end to end, then corrected it.
 Specific overrides:
 
-1. **Raw `pg` → Prisma.** The first scaffold used `pg` with hand-written SQL. I
+1. **Raw `pg` → Prisma 7.** The first scaffold used `pg` with hand-written SQL. I
    moved the data layer to Prisma: the schema becomes a single typed source of
    truth, migrations are generated and version-controlled, and the query in
-   `repository.js` is checked against the model at build time rather than being a
-   string. The trade-offs I accepted are in §4. This is a stack choice I own and
-   can defend either way — for one endpoint raw SQL is also entirely reasonable.
+   `repository.js` is checked against the model rather than being a string. On
+   Prisma 7 the connection is split — the CLI URL lives in `prisma.config.mjs`,
+   and the app passes its own `pg` pool to `new PrismaClient({ adapter })` via
+   `@prisma/adapter-pg`. That split is more moving parts than Prisma 6's
+   `datasource.url`, but it is the current supported shape and it puts pool size
+   and `statement_timeout` back under explicit control in `src/db.js`. This is a
+   stack choice I own and can defend either way — for one endpoint raw `pg` is
+   also entirely reasonable.
 
 2. **Prisma's built-in cursor pagination is not enough — kept an explicit keyset
    predicate.** `prisma.findMany({ cursor, skip: 1 })` keys on one unique field.
@@ -106,9 +111,9 @@ Specific overrides:
    round trips. Rewrote using `createMany` in 5,000-row chunks, plus an `ANALYZE`
    at the end so the planner has stats immediately.
 
-8. **`statement_timeout`.** Not in the generated code. Pushed it into the Prisma
-   connection string (`options=-c statement_timeout=…`) so a pathological query
-   cannot pin a pool connection forever (§3).
+8. **`statement_timeout`.** Not in the generated code. Set on the `pg` pool the
+   adapter is given (`statement_timeout` + `max` in `src/db.js`) so a pathological
+   query cannot pin a pool connection forever (§3).
 
 9. **`Decimal` / `BigInt` serialization.** Prisma returns `id` as `BigInt` and
    `total_amount` as `Prisma.Decimal`; `JSON.stringify` throws on the first and
@@ -127,11 +132,11 @@ That was the design goal and it holds. `EXPLAIN ANALYZE` on the SQL Prisma emits
 for a whale account, mid-pagination:
 
 ```
-Limit  (actual time=0.046..0.056 rows=21 loops=1)
+Limit  (actual time=0.041..0.051 rows=21 loops=1)
   ->  Index Scan using idx_orders_user_created on orders
         Index Cond: (user_id = 2)
         Filter: ((created_at < now()) OR ((created_at = now()) AND (id < 999999)))
-Execution Time: 0.133 ms
+Execution Time: 0.109 ms
 ```
 
 No sort node, no heap scan beyond the rows returned. Note the boundary is a
@@ -146,14 +151,14 @@ boundary. If that ever showed up in a profile, this one query drops to
 **What breaks first: connection-pool saturation, and the timeout cascade behind
 it.**
 
-Prisma's pool is fixed (`connection_limit`, set from `DB_POOL_MAX`, default 10).
+The `pg` pool behind the adapter is fixed (`max`, from `DB_POOL_MAX`, default 10).
 At 100× the same endpoint is also serving 100× the traffic, and it now shares the
 database with 100× everyone else's load — reporting queries, backfills, an
 unindexed query someone shipped last week. Mean latency on *our* query drifts from
 ~2 ms to ~30–50 ms under that contention. At that point:
 
 - in-flight requests × latency exceeds the 10 pool slots,
-- new requests wait on Prisma's `pool_timeout` (default 10 s), then throw `P2024`,
+- new checkouts wait, then time out (`connectionTimeoutMillis`) and error,
 - the load balancer retries, adding load,
 - p95 goes from 40 ms to multiple seconds, then 503s.
 
@@ -164,9 +169,9 @@ classic "it was fine in staging" failure.
 
 - **p95/p99 latency alert per route** (not just an average) — the average stays
   fine long after the tail has broken.
-- **Pool telemetry**: Prisma's `prisma_pool_connections_busy` /
-  `_idle` and `prisma_client_queries_wait` metrics (via `prisma.$metrics`)
-  exported to Prometheus; alert when queries are waiting for a connection.
+- **Pool telemetry**: the `pg` pool's `totalCount` / `idleCount` / `waitingCount`
+  (the adapter exposes the pool) exported to Prometheus; alert when
+  `waitingCount > 0` for more than a few seconds.
 - **`pg_stat_statements`** — watch `mean_exec_time` and `stddev_exec_time` for the
   history query specifically; a rising stddev is the early signal that the DB is
   contended even before our mean moves much.
