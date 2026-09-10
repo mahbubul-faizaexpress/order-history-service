@@ -1,0 +1,50 @@
+### How to use this file
+#
+# 1. Install the VS Code extension "REST Client" (humao.rest-client).
+# 2. Get two tokens from the terminal:
+#       npm run token 2            (a normal user)
+#       npm run token 1 admin      (an admin)
+# 3. Paste each token after the "=" signs just below.
+# 4. Click "Send Request" above any request.
+
+@baseUrl = http://localhost:3000
+@userToken = PASTE_THE_"npm run token 2"_TOKEN_HERE
+@adminToken = PASTE_THE_"npm run token 1 admin"_TOKEN_HERE
+
+
+### Health check (no token needed)
+GET {{baseUrl}}/health
+
+
+### User 2 views their own orders (newest first, default 20)
+GET {{baseUrl}}/api/users/2/orders
+Authorization: Bearer {{userToken}}
+
+
+### Same, but 5 per page — copy "next_cursor" from the response into the next request
+GET {{baseUrl}}/api/users/2/orders?limit=5
+Authorization: Bearer {{userToken}}
+
+
+### Next page — replace PASTE_CURSOR_HERE with the next_cursor value from above
+GET {{baseUrl}}/api/users/2/orders?limit=5&cursor=PASTE_CURSOR_HERE
+Authorization: Bearer {{userToken}}
+
+
+### Admin can view any user's orders
+GET {{baseUrl}}/api/users/2/orders
+Authorization: Bearer {{adminToken}}
+
+
+### User 2 tries to view user 3's orders -> 403 Forbidden
+GET {{baseUrl}}/api/users/3/orders
+Authorization: Bearer {{userToken}}
+
+
+### A user with no orders -> 200 with an empty list
+GET {{baseUrl}}/api/users/21/orders
+Authorization: Bearer {{adminToken}}
+
+
+### No token -> 401 Unauthorized
+GET {{baseUrl}}/api/users/2/orders

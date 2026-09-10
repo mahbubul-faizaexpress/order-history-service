@@ -35,32 +35,41 @@ curl localhost:3000/health
 
 ## Trying the endpoint
 
-The endpoint expects a verified `Bearer` JWT (`sub` = user id, `role` = `customer` | `admin`).
-Signing secret is `JWT_SECRET` in `.env`. Mint sample tokens:
+The endpoint needs a `Bearer` token that says who is calling (`sub` = user id,
+`role` = `customer` or `admin`). In the seed data, **user 1 is an admin** and
+everyone else is a normal customer.
+
+### Step 1 — get a token
 
 ```bash
-node -e "console.log(require('jsonwebtoken').sign({sub:'2',role:'customer'}, process.env.JWT_SECRET || require('dotenv').config().parsed.JWT_SECRET, {algorithm:'HS256'}))"
+npm run token 2          # token for normal user 2
+npm run token 1 admin    # token for the admin
 ```
 
-Or use these helpers (user 1 is the seeded admin):
+Each command prints the token and a ready-to-run `curl` line.
+
+### Step 2 — call the endpoint
+
+Copy a token from step 1 into `TOKEN=...`, then:
 
 ```bash
-SELF=$(node -e "require('dotenv').config();console.log(require('jsonwebtoken').sign({sub:'2',role:'customer'},process.env.JWT_SECRET))")
-ADMIN=$(node -e "require('dotenv').config();console.log(require('jsonwebtoken').sign({sub:'1',role:'admin'},process.env.JWT_SECRET))")
+TOKEN=<paste token here>
 
-# user 2 viewing their own orders
-curl -s "localhost:3000/api/users/2/orders" -H "Authorization: Bearer $SELF" | jq
+# user 2's orders, newest first
+curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/users/2/orders
 
-# next page
-curl -s "localhost:3000/api/users/2/orders?limit=5" -H "Authorization: Bearer $SELF" | jq
-curl -s "localhost:3000/api/users/2/orders?limit=5&cursor=<next_cursor>" -H "Authorization: Bearer $SELF" | jq
+# 5 per page
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:3000/api/users/2/orders?limit=5"
 
-# admin viewing user 2
-curl -s "localhost:3000/api/users/2/orders" -H "Authorization: Bearer $ADMIN" | jq
-
-# user 2 trying to view user 3 -> 403
-curl -s -o /dev/null -w "%{http_code}\n" "localhost:3000/api/users/3/orders" -H "Authorization: Bearer $SELF"
+# next page: take "next_cursor" from the previous response and pass it back
+curl -H "Authorization: Bearer $TOKEN" "http://localhost:3000/api/users/2/orders?limit=5&cursor=PASTE_NEXT_CURSOR"
 ```
+
+### Easier: click-to-run in VS Code
+
+Open **[api.http](api.http)**, install the "REST Client" extension when prompted,
+paste your two tokens at the top, and click **Send Request** above any request.
+It covers every case — own orders, paging, admin access, 403, empty user, 401.
 
 ---
 
@@ -113,12 +122,15 @@ it does not touch the seeded development data.
 ## Layout
 
 ```
+api.http          click-to-run requests for VS Code REST Client
 prisma/
   schema.prisma   models (mapped to snake_case tables)
   migrations/     init + hand-written CHECK constraints
 db/
   seed.js         ~5k users / ~50k orders, skewed order counts
   migrate-test.js  pretest hook: migrate the test database
+scripts/
+  token.js        prints a test JWT (`npm run token`)
 src/
   app.js          express app factory (imported by tests)
   server.js       listen + graceful shutdown
