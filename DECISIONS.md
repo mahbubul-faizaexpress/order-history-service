@@ -107,7 +107,17 @@ Specific overrides:
 
 The paginated query itself does **not** break — keyset + `idx_orders_user_created`
 keeps every page a bounded index range scan regardless of account size or page
-depth. That was the design goal and it holds.
+depth. That was the design goal and it holds. On the seeded data (`EXPLAIN
+ANALYZE` on a whale account):
+
+```
+Limit  (actual time=0.022..0.035 rows=21 loops=1)
+  ->  Index Scan using idx_orders_user_created on orders
+        Index Cond: ((user_id = 2) AND (ROW(created_at, id) < ROW(now(), ...)))
+Execution Time: 0.124 ms
+```
+
+No sort node, no heap scan beyond the 21 rows returned.
 
 **What breaks first: pg connection-pool saturation, and the timeout cascade behind
 it.**
