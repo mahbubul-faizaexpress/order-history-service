@@ -55,7 +55,8 @@ Postgres ................. idx_orders_user_created does the work
 
 3. **Pagination is mandatory, and keyset — not page numbers.** Requirement #2
    only means something if the response is bounded. Default `limit` 20, max 100,
-   opaque `next_cursor`. Rationale for keyset over `?page=N` is in §3.
+   opaque `next_cursor`. Rationale for keyset over `?page=N` is under
+   *What I deliberately did not build*, below.
 
 4. **"No orders" is `200` with `{ "data": [] }`, not `404`.** The user resource
    exists; the collection is empty. `404` is about the user, and requirement #3
@@ -87,8 +88,10 @@ Postgres ................. idx_orders_user_created does the work
    `id`, `status`, `total_amount`, `currency` — reconciling names is a small edit
    in one model file and the migration regenerates.
 
-9. **Single currency per order, stored as a plain column.** No FX, no minor-unit
-   integers. Fine at this scale; flagged in §4.
+9. **Single currency per order, stored as a plain column.** No FX conversion, no
+   minor-unit integer storage. Fine while every order is in BDT; the day a second
+   currency shows up, `total_amount` alone becomes ambiguous — a real schema
+   change, not a display tweak, so I have not tried to half-build it.
 
 10. **`limit` is a hint, `id` and `cursor` are contracts.** A garbage `limit`
     falls back to the default; a garbage `id` or `cursor` is a `400`. The former
@@ -119,7 +122,8 @@ that mattered:
    repeats rows that share a timestamp. AI's first Prisma pass used it. I replaced
    it with an explicit `WHERE created_at < $ts OR (created_at = $ts AND id < $id)`
    built through the query API, and a cursor carrying **both** parts. `EXPLAIN`
-   confirms it still rides `idx_orders_user_created` (§3).
+   confirms it still rides `idx_orders_user_created` (see *What breaks first at
+   100×*, below).
 
 3. **`OFFSET` / `skip`.** The raw-SQL draft paginated with `LIMIT/OFFSET`;
    Prisma's `skip` is the same trap. `O(offset)` — page 5,000 of a large account
@@ -146,7 +150,8 @@ that mattered:
    planner has statistics before the first request.
 
 8. **`statement_timeout`, pool bounds, connect timeout.** None were in the
-   generated code. Set on the `pg` pool in `src/db.js` (§3).
+   generated code. Set on the `pg` pool in `src/db.js` — see *What breaks first
+   at 100×*, below, for why each one matters.
 
 9. **Environment validation.** The generated `config.js` read `process.env`
    ad hoc and would fail on the first request with a vague error. Replaced with a
@@ -272,8 +277,9 @@ Each of these is a cut, not an oversight.
   FK directly).
 
 - **OpenAPI document, distributed tracing (OTel), an app Dockerfile,
-  Prometheus wiring.** Time budget. The README is the API contract; §3 says
-  exactly which metrics matter when it is time to add them.
+  Prometheus wiring.** Time budget. The README is the API contract; *What
+  breaks first at 100×* above already names exactly which metrics matter when
+  it is time to add them.
 
 ---
 
